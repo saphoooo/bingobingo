@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -9,12 +10,20 @@ import (
 	"time"
 
 	"github.com/gomodule/redigo/redis"
-	"github.com/gorilla/mux"
 	"github.com/rs/zerolog/log"
+	redigotrace "gopkg.in/DataDog/dd-trace-go.v1/contrib/gomodule/redigo"
+	muxtrace "gopkg.in/DataDog/dd-trace-go.v1/contrib/gorilla/mux"
+	"gopkg.in/DataDog/dd-trace-go.v1/ddtrace/tracer"
 )
 
 func main() {
-	r := mux.NewRouter()
+	tracer.Start(
+		tracer.WithEnv("prod"),
+		tracer.WithService("bingo"),
+		tracer.WithServiceVersion("v1.0"),
+	)
+	defer tracer.Stop()
+	r := muxtrace.NewRouter(muxtrace.WithServiceName("bingo"))
 	r.HandleFunc("/", bingo).Methods("POST")
 	log.Print("Start listening on :8000...")
 	err := http.ListenAndServe(":8000", r)
@@ -28,10 +37,11 @@ func bingo(w http.ResponseWriter, r *http.Request) {
 		MaxIdle:     10,
 		IdleTimeout: 240 * time.Second,
 		Dial: func() (redis.Conn, error) {
-			return redis.Dial("tcp", "redis-master:6379")
+			return redigotrace.Dial("tcp", "redis-master:6379",
+				redigotrace.WithServiceName("redis"),
+			)
 		},
 	}
-	fmt.Println(r.Body)
 	var myForm bingoNumber
 	myForm.Name = r.PostFormValue("name")
 	formValue, err := strconv.Atoi(r.PostFormValue("number"))
@@ -46,7 +56,7 @@ func bingo(w http.ResponseWriter, r *http.Request) {
 			Int("status", http.StatusInternalServerError).
 			Msg(err.Error())
 		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprint(w, err.Error())
+		fmt.Fprint(w, "Oops something wrong happened...")
 		return
 	}
 	myForm.Number = formValue
@@ -64,7 +74,7 @@ func bingo(w http.ResponseWriter, r *http.Request) {
 			Int("status", http.StatusInternalServerError).
 			Msg(err.Error())
 		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprint(w, err.Error())
+		fmt.Fprint(w, "Oops something wrong happened...")
 		return
 	}
 	if userDailyQuota {
@@ -99,7 +109,7 @@ func bingo(w http.ResponseWriter, r *http.Request) {
 			Int("status", http.StatusInternalServerError).
 			Msg(err.Error())
 		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprint(w, err.Error())
+		fmt.Fprint(w, "Oops something wrong happened...")
 		return
 	}
 	if bingoNumberOfTheDay == myForm.Number {
@@ -139,14 +149,21 @@ func bingo(w http.ResponseWriter, r *http.Request) {
 
 func checkUserDailyQuota(pool *redis.Pool, name string) (bool, error) {
 	conn := pool.Get()
-	_, err := conn.Do("AUTH", os.Getenv("REDIS_PASSWORD"))
+	defer conn.Close()
+
+	root, ctx := tracer.StartSpanFromContext(context.Background(), "parent.request",
+		tracer.ServiceName("bingo"),
+		tracer.ResourceName("redis"),
+	)
+	defer root.Finish()
+
+	_, err := conn.Do("AUTH", os.Getenv("REDIS_PASSWORD"), ctx)
 	if err != nil {
 		log.Error().Msg("error during authentication")
 		return false, err
 	}
-	defer conn.Close()
 
-	exists, err := redis.Int(conn.Do("EXISTS", name))
+	exists, err := redis.Int(conn.Do("EXISTS", name, ctx))
 	if err != nil {
 		log.Error().Msg("error getting name")
 		return false, err
@@ -160,7 +177,7 @@ func checkUserDailyQuota(pool *redis.Pool, name string) (bool, error) {
 			return false, err
 		}
 		// set expiry of 1 day
-		_, err = conn.Do("EXPIRE", name, 86400)
+		_, err = conn.Do("EXPIRE", name, 86400, ctx)
 		if err != nil {
 			log.Error().Msg("error setting expiry")
 			return false, err
@@ -173,14 +190,21 @@ func checkUserDailyQuota(pool *redis.Pool, name string) (bool, error) {
 
 func getBingoNumberOfTheDay(pool *redis.Pool) (int, error) {
 	conn := pool.Get()
-	_, err := conn.Do("AUTH", os.Getenv("REDIS_PASSWORD"))
+	defer conn.Close()
+
+	root, ctx := tracer.StartSpanFromContext(context.Background(), "parent.request",
+		tracer.ServiceName("bingo"),
+		tracer.ResourceName("redis"),
+	)
+	defer root.Finish()
+
+	_, err := conn.Do("AUTH", os.Getenv("REDIS_PASSWORD"), ctx)
 	if err != nil {
 		log.Error().Msg("error during authentication")
 		return 0, err
 	}
-	defer conn.Close()
 
-	exists, err := redis.Int(conn.Do("EXISTS", "bingoNumberOfTheDay"))
+	exists, err := redis.Int(conn.Do("EXISTS", "bingoNumberOfTheDay", ctx))
 	if err != nil {
 		log.Error().Msg("error verifying bingoNumberOfTheDay")
 		return 0, err
@@ -200,7 +224,7 @@ func getBingoNumberOfTheDay(pool *redis.Pool) (int, error) {
 		}
 		return returnValue, nil
 	}
-	number, err := redis.Int(conn.Do("GET", "bingoNumberOfTheDay"))
+	number, err := redis.Int(conn.Do("GET", "bingoNumberOfTheDay", ctx))
 	if err != nil {
 		log.Error().Msg("error getting bingoNumberOfTheDay")
 		return 0, err
