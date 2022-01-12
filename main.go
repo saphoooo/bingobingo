@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -18,13 +19,18 @@ import (
 
 func main() {
 	tracer.Start(
-		tracer.WithEnv("prod"),
-		tracer.WithService("bingo"),
-		tracer.WithServiceVersion("v1.0"),
+		/*
+			tracer.WithEnv("prod"),
+			tracer.WithService("bingo"),
+			tracer.WithServiceVersion("v1.0"),
+		*/
+		tracer.WithGlobalTag("env", "prod"),
+		tracer.WithGlobalTag("service", "bingo"),
+		tracer.WithGlobalTag("version", "v1.0"),
 	)
 	defer tracer.Stop()
 	r := muxtrace.NewRouter(muxtrace.WithServiceName("bingo"))
-	r.HandleFunc("/", bingo).Methods("POST")
+	r.HandleFunc("/api/try", bingo).Methods("POST")
 	log.Print("Start listening on :8000...")
 	err := http.ListenAndServe(":8000", r)
 	if err != nil {
@@ -42,9 +48,14 @@ func bingo(w http.ResponseWriter, r *http.Request) {
 			)
 		},
 	}
-	var myForm bingoNumber
-	myForm.Name = r.PostFormValue("name")
-	formValue, err := strconv.Atoi(r.PostFormValue("number"))
+	if span, ok := tracer.SpanFromContext(r.Context()); ok {
+		span.SetTag("http.url", r.URL.Path)
+	}
+	body, err := ioutil.ReadAll(r.Body)
+
+	// to be removed
+	fmt.Println(string(body))
+
 	if err != nil {
 		log.Error().
 			Str("hostname", r.Host).
@@ -56,11 +67,11 @@ func bingo(w http.ResponseWriter, r *http.Request) {
 			Int("status", http.StatusInternalServerError).
 			Msg(err.Error())
 		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprint(w, "Oops something wrong happened...")
+		fmt.Fprint(w, "{\"message\": \"Oops something wrong happened...\"")
 		return
 	}
-	myForm.Number = formValue
-	userDailyQuota, err := checkUserDailyQuota(pool, myForm.Name)
+	var try bingoTry
+	err = json.Unmarshal(body, &try)
 	if err != nil {
 		log.Error().
 			Str("hostname", r.Host).
@@ -69,16 +80,31 @@ func bingo(w http.ResponseWriter, r *http.Request) {
 			Str("remote_ip", r.RemoteAddr).
 			Str("path", r.RequestURI).
 			Str("user-agent", r.UserAgent()).
-			Str("username", myForm.Name).
-			Int("number", myForm.Number).
 			Int("status", http.StatusInternalServerError).
 			Msg(err.Error())
 		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprint(w, "Oops something wrong happened...")
+		fmt.Fprint(w, "{\"message\": \"Oops something wrong happened...\"")
+		return
+	}
+	userDailyQuota, err := checkUserDailyQuota(pool, try.Name)
+	if err != nil {
+		log.Error().
+			Str("hostname", r.Host).
+			Str("method", r.Method).
+			Str("proto", r.Proto).
+			Str("remote_ip", r.RemoteAddr).
+			Str("path", r.RequestURI).
+			Str("user-agent", r.UserAgent()).
+			Str("username", try.Name).
+			Str("number", try.Number).
+			Int("status", http.StatusInternalServerError).
+			Msg(err.Error())
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, "{\"message\": \"Oops something wrong happened...\"")
 		return
 	}
 	if userDailyQuota {
-		message := "hey " + myForm.Name + ", you already tried your luck today"
+		message := "hey " + try.Name + ", you already tried your luck today"
 		log.Info().
 			Str("hostname", r.Host).
 			Str("method", r.Method).
@@ -86,12 +112,12 @@ func bingo(w http.ResponseWriter, r *http.Request) {
 			Str("remote_ip", r.RemoteAddr).
 			Str("path", r.RequestURI).
 			Str("user-agent", r.UserAgent()).
-			Str("username", myForm.Name).
-			Int("number", myForm.Number).
+			Str("username", try.Name).
+			Str("number", try.Number).
 			Int("status", http.StatusOK).
 			Msg(message)
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, message)
+		fmt.Fprint(w, "{\"message\": "+message+"}")
 		return
 	}
 
@@ -104,16 +130,34 @@ func bingo(w http.ResponseWriter, r *http.Request) {
 			Str("remote_ip", r.RemoteAddr).
 			Str("path", r.RequestURI).
 			Str("user-agent", r.UserAgent()).
-			Str("username", myForm.Name).
-			Int("number", myForm.Number).
+			Str("username", try.Name).
+			Str("number", try.Number).
 			Int("status", http.StatusInternalServerError).
 			Msg(err.Error())
 		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprint(w, "Oops something wrong happened...")
+		fmt.Fprint(w, "{\"message\": \"Oops something wrong happened...\"")
 		return
 	}
-	if bingoNumberOfTheDay == myForm.Number {
-		message := "hooray " + myForm.Name + ", great job you guess the correct number!"
+	tryNumber, err := strconv.Atoi(try.Number)
+	if err != nil {
+		log.Error().
+			Str("hostname", r.Host).
+			Str("method", r.Method).
+			Str("proto", r.Proto).
+			Str("remote_ip", r.RemoteAddr).
+			Str("path", r.RequestURI).
+			Str("user-agent", r.UserAgent()).
+			Str("username", try.Name).
+			Str("number", try.Number).
+			Int("status", http.StatusInternalServerError).
+			Msg(err.Error())
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, "{\"message\": \"Oops something wrong happened...\"")
+		return
+	}
+
+	if bingoNumberOfTheDay == tryNumber {
+		message := "hooray " + try.Name + ", great job you guess the correct number!"
 		log.Info().
 			Str("hostname", r.Host).
 			Str("method", r.Method).
@@ -121,16 +165,16 @@ func bingo(w http.ResponseWriter, r *http.Request) {
 			Str("remote_ip", r.RemoteAddr).
 			Str("path", r.RequestURI).
 			Str("user-agent", r.UserAgent()).
-			Str("username", myForm.Name).
-			Int("number", myForm.Number).
+			Str("username", try.Name).
+			Str("number", try.Number).
 			Int("status", http.StatusOK).
 			Msg(message)
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, message)
+		fmt.Fprint(w, "{\"message\": "+message+"}")
 		return
 	}
 
-	message := "sorry " + myForm.Name + ", you didn't guess the right number this time, but try again tomorrow!"
+	message := "sorry " + try.Name + ", you didn't guess the right number this time, but try again tomorrow!"
 	log.Info().
 		Str("hostname", r.Host).
 		Str("method", r.Method).
@@ -138,12 +182,12 @@ func bingo(w http.ResponseWriter, r *http.Request) {
 		Str("remote_ip", r.RemoteAddr).
 		Str("path", r.RequestURI).
 		Str("user-agent", r.UserAgent()).
-		Str("username", myForm.Name).
-		Int("number", myForm.Number).
+		Str("username", try.Name).
+		Str("number", try.Number).
 		Int("status", http.StatusOK).
 		Msg(message)
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprint(w, message)
+	fmt.Fprint(w, "{\"message\": "+message+"}")
 
 }
 
@@ -232,7 +276,7 @@ func getBingoNumberOfTheDay(pool *redis.Pool) (int, error) {
 	return number, nil
 }
 
-type bingoNumber struct {
+type bingoTry struct {
 	Name   string `json:"name"`
-	Number int    `json:"number"`
+	Number string `json:"number"`
 }
